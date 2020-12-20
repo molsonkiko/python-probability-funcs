@@ -140,6 +140,8 @@ weights: a vector of same length as pop, containing weights to assign to
 If replace is False, sampling is done without replacement.
 NOTE: At present, WEIGHTED SAMPLING WITHOUT REPLACEMENT IS NOT IMPLEMENTED.
 So you can do weighted sampling with replacement, and unweighted sampling with or without replacement.
+WARNING!!! THIS FUNCTION HAS BEHAVED UNPREDICTABLY IN THE PAST WHEN SOME VALUES HAVE ZERO WEIGHT!!!
+I BELIEVE this bug is fixed, but keep an eye out.
 	'''
 	if weights is not None and not replace:
 		raise NotImplementedError
@@ -149,7 +151,15 @@ So you can do weighted sampling with replacement, and unweighted sampling with o
 		else: #unbiased sampling without replacement
 			return np.array(random.sample(pop,n))
 	else: #the entries have weighted probabability.
-		choices=np.random.random(n)
+		choices=np.random.random(n) #a series of random numbers uniform from 0 to 1
+		nupop,nuweights=[],[]
+		for i in range(len(pop)):
+			if weights[i] != 0:
+				nupop.append(pop[i]) #excise all values from pop and weights with zero weight.
+				nuweights.append(weights[i])
+		pop,weights = nupop, nuweights
+		if len(pop)==1: #happens when only one value has any weight
+			return [pop[0]]*n
 		cumweight=np.cumsum(weights)/sum(weights)
 		#print(cumweight)
 		output=[]
@@ -420,6 +430,12 @@ Note: This is VERY SLOW. A lookup table would probably make it much faster.
 		guess=pnorm(mid,mu,sd)
 
 def newtraph(func,x,epsilon=1e-7):
+	'''My implementation of the Newton-Raphson method. 
+func: a function that (hopefully) has some zeros.
+x: the starting value from which to initiate the process.
+epsilon: How close the function needs to get to zero before it quits.
+returns: a tuple, (value of the first zero found, number of loops to converge)
+Stops after 9000 iterations.'''
 	loops=0
 	while abs(func(x))>epsilon:
 		loops+=1
@@ -709,10 +725,107 @@ If x is not None: return this function's derivative evaluated at x.'''
 		if len(self)==3:
 			return quadroot(self[0],self[1],self[2])
 
+def absorb_times(chain,trials_per_start):
+	'''Given a Markov chain with some number of absorbing states,
+simulate the time evolution of the Markov chain and find the distribution of
+times to absorption for different starting states, as well as the
+relative frequency with which the chain is absorbed to one state versus
+another absorbing state from starting states.
+
+Example:
+Given the markov chain mat =
+array([[0.33333333, 0.33333333, 0.33333333, 0.		  ],
+	   [0.5		  , 0.25	  , 0.		  , 0.25	  ],
+	   [0.		  , 0.		  , 1.		  , 0.		  ],
+	   [0.		  , 0.		  , 0.		  , 1.		  ]])
+a typical output of absorb_times(mat,10) might be
+{0: {2: [4, 2, 4, 5, 2, 2, 2], 3: [11, 5, 12]}, 
+	1: {2: [3, 3, 3, 7, 6], 3: [12, 5, 4, 4, 3]}, 
+	2: {2: [0], 3: []}, 
+	3: {2: [], 3: [0]}}
+You can see that in ten trials, there were four absorptions to state 4 from state 2,
+and seven absorptions to state 3 from state 1.
+The longest time to absorption was 12 steps, and the shortest time to absorption
+from a non-absorbing state was 2 steps.
+The 2nd and third states only have one column because there is no reason to simulate a Markov process
+that begins in an absorbing state.
+
+There are probably more performant ways to do this kind of simulation, but I'm too lazy.
+'''
+	n=chain.shape[0]
+	if chain.shape[1]!=n:
+		return "This matrix is not square."
+	options=list(range(n))
+	absorbers=[] #find absorbing states
+	for i in range(n):
+		if chain[i,i]==1:
+			absorbers.append(i)
+	if len(absorbers)==0:
+		return "There is no absorbing state in this matrix."
+	can_reach={ab:False for ab in absorbers}
+	for ab in absorbers:
+		can_reach[ab]=reachable(chain,ab,'any')
+	if not any(can_reach.values()):
+		return "None of the absorbing states are reachable."
+	for i in range(n):
+		row=chain[i,:]
+		if not sum(row)==1:
+			return f"Row {i} of the matrix does not sum to 1"
+	results={}
+	for start in range(n):
+		results[start]=dict(zip(absorbers,[[] for ab in absorbers]))
+		if chain[start,start]==1: #don't waste time or space simulating the case where you start on an absorbing state
+			results[start][start].append(0)
+			continue
+		for trial in range(trials_per_start):
+			i=start
+			steps=0
+			while True:
+				row=chain[i,:]
+				if chain[i,i]==1:
+					#you've reached an absorbing state, so indicate which state it was
+					#and how many steps it took to get there
+					results[start][i].append(steps)
+					break
+				#randomly choose from the locations in the chain that are accessible
+				#from state i (the values of j such that chain[i,j] is nonzero.
+				#The probability of an accessible location being selected is weighted by chain[i,j].
+				i=sample(options,1,True,row)[0] #this is undoubtedly the slowest step by far
+				steps+=1
+	return results	
+
+def reachable(chain,address,From='any'):
+	'''chain: a matrix representing a Markov chain.
+address: an integer, representing a state in the Markov chain.
+From: if 'any', returns True if address is accessible from ANY other starting state in the chain, else False
+If From=='all', returns True if address is accessible from ALL other starting states in the chain, else False.
+If From is an integer, returns True if address is accessible from the state From, else False.
+returns: boolean, whether or not the address can be reached from
+	ANY other initial state in the Markov chain.
+fromall: If true, tests if address is reachable from ALL other initial states in the Markov chain.'''
+	l=chain.shape[0]
+	if type(From)==int:
+		return chain[From,address]!=0
+	elif From=='all':
+		if all(reachable(chain,address,i) for i in range(l)):
+			return True
+		else:
+			#Do depth-first search for address from every other starting state
+			print(f"""State {address} is not reachable in one step from any other state.
+This function cannot determine whether it is truly unreachable, though.
+			""")
+			raise NotImplementedError
+	elif From=='any':
+		return any(reachable(chain,address,i) for i in range(l))
+	else:
+		return f"{From} is an invalid value for the From argument."
+	return False
+#Some test polynoms to demonstrate the functionality of the class
 quartic = polynom([5,1,-1,0,2.3423])
 iquart=quartic.Int()
 dquart=quartic.der()
 
+#Miscellaneous test functions to test functions like newtraph, crv_var_exp, convex, Integrate.
 exp=lambda x: e**x
 
 tan = lambda x: np.sin(x)/np.cos(x)
